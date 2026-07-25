@@ -62,10 +62,13 @@ Look up the latest attestation for one identity. `<id>` may be any of:
 | Form | Example |
 |------|---------|
 | Miner ID (string) | `g4-powerbook-115` |
-| RTC wallet address | `RTC6686166a9f6afc55a8ff5ebff232be8c956c024e` |
-| Signing public key (hex) | `5e8c...40-hex-chars` |
+| RTC wallet address (when it is the node's miner-id) | `RTC6686166a9f6afc55a8ff5ebff232be8c956c024e` |
+| Signing public key (64-hex, uniquely claimed) | `5e8c...64-hex-chars` |
 
-The lookup is matched against the `miner` and `signing_pubkey` columns of the RustChain node's `miner_attest_recent` table (read-only). The most recent row wins.
+The lookup is matched against the RustChain node's `miner_attest_recent` table (read-only). The two columns are **separate namespaces and are resolved in order** — see [Identity resolution](#identity-resolution):
+
+1. exact match on `miner` (the node's primary key) — wins outright;
+2. otherwise, if `<id>` is a well-formed 64-hex Ed25519 key, exact match on `signing_pubkey`, provided exactly one miner claims it.
 
 **Response 200 — identity found**
 
@@ -82,7 +85,10 @@ The lookup is matched against the `miner` and `signing_pubkey` columns of the Ru
     "device_arch": "g4",
     "antiquity_class": "vintage-ppc",
     "attestation_age_s": 8421,
-    "fresh": true
+    "fresh": true,
+    "matched_field": "miner",
+    "matched_miner": "g4-powerbook-115",
+    "ambiguous_identity": false
   },
   "issued_at": 1749924891,
   "oracle_pubkey": "a1b2c3d4e5f6...64-hex-chars",
@@ -105,7 +111,10 @@ The lookup is matched against the `miner` and `signing_pubkey` columns of the Ru
     "device_family": null,
     "antiquity_class": null,
     "attestation_age_s": null,
-    "fresh": false
+    "fresh": false,
+    "matched_field": null,
+    "matched_miner": null,
+    "ambiguous_identity": false
   },
   "issued_at": 1749924891,
   "oracle_pubkey": "...",
@@ -163,6 +172,27 @@ The lookup is matched against the `miner` and `signing_pubkey` columns of the Ru
 | `antiquity_class` | string \| null | Coarse antiquity bucket — see [Antiquity classes](#antiquity-classes). |
 | `attestation_age_s` | int \| null | Seconds since the node's `ts_ok`. `null` if not found. |
 | `fresh` | bool | `true` if `attestation_age_s < 86400` (24h, matches the node's validity window). |
+| `matched_field` | `"miner"` \| `"signing_pubkey"` \| null | Which identity namespace answered. `miner` is the node's primary key; `signing_pubkey` is self-reported by the attesting miner. `null` if `found=false`. |
+| `matched_miner` | string \| null | The node-assigned miner-id of the row that produced this verdict. Equal to `query` for a `miner` match. Lets a consumer see *whose* hardware was described. |
+| `ambiguous_identity` | bool | `true` when several miners claim the queried public key. The oracle then returns `found: false` rather than picking one — see [Identity resolution](#identity-resolution). |
+
+### Identity resolution
+
+`miner` and `signing_pubkey` are not interchangeable, and the difference is a security property:
+
+| Column | Origin | Trustworthiness |
+|--------|--------|-----------------|
+| `miner` | the node's PRIMARY KEY — assigned, unique, IP-rate-limited | authoritative |
+| `signing_pubkey` | the `public_key` field of the attestation request body | **self-reported**; the node verifies it only when a `signature` is also supplied, and unsigned attestations are supported |
+
+Resolving both in a single `WHERE miner = ? OR signing_pubkey = ?` with `ORDER BY ts_ok DESC` would let anyone take over another identity's verdict simply by naming their own `public_key` after it and attesting more often. The oracle therefore:
+
+1. matches `miner` exactly first — the primary key always wins, no matter how fresh a competing claim is;
+2. consults `signing_pubkey` only when the identity is a well-formed 64-hex Ed25519 key, so arbitrary strings (miner-ids, wallet addresses, anything else) can never be resolved through the self-reported column;
+3. returns `found: false` with `ambiguous_identity: true` when more than one miner claims the same key — an unverified claim contested by two parties has no honest winner;
+4. publishes `matched_field` and `matched_miner` inside the **signed** attestation, so a consumer can always tell which namespace answered and whose row it was.
+
+A consumer pinning a specific machine should query by miner-id, or require `matched_field === "miner"`.
 
 > **Note:** No field is ever named a bare `verified`. The signed field is `attestation`, with `is_physical` and `fresh` as two orthogonal facts clients can compose.
 
@@ -252,7 +282,8 @@ The sidecar takes four CLI flags:
 | `503 data source unavailable: <sqlite error>` | The RustChain node's DB is missing, locked, or in a read-only directory. |
 | `400 missing identity` | You called `/oracle/attest/` with a trailing slash and no ID. |
 | Verification fails | The oracle's `pubkey` changed (key rotated) OR the response was tampered with. |
-| `attestation.found: false` | Identity not in `miner_attest_recent` (never mined, or pruned by the node's 24h window). |
+| `attestation.found: false` | Identity not in `miner_attest_recent` (never mined, or pruned by the node's 24h window), OR the identity is not a miner-id and not a well-formed 64-hex key. |
+| `attestation.ambiguous_identity: true` | Two or more miners submitted attestations claiming that same `public_key`. Query by miner-id instead. |
 
 ---
 

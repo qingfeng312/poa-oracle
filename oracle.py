@@ -21,18 +21,29 @@ NO field is ever named a bare `verified` — the signed field is `attestation`.
 
 Honest labeling: this is a SINGLE-node signed oracle. Multi-node N-of-5
 co-signing is future work and is NOT claimed here.
+
+Identity namespaces are also part of that honesty: `miner` is the node's
+primary key, `signing_pubkey` is self-reported by the attesting miner. They are
+resolved separately (see OracleDB.lookup) and every verdict says which one
+answered, so a signed verdict can never be about somebody else's hardware.
 """
 
 import argparse
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 ATTESTATION_TTL = 86400  # 24h; matches the node's attestation validity window
+
+# An Ed25519 public key as the node stores it: 32 bytes, lowercase hex.
+# Identities that do not match this are looked up ONLY against the node's
+# primary key (`miner`) — see OracleDB.lookup().
+_ED25519_PUBKEY_HEX = re.compile(r"^[0-9a-f]{64}$")
 
 SCOPE = (
     "attests: hardware is physically present and non-emulated, plus its "
@@ -66,20 +77,56 @@ class OracleDB:
     def __init__(self, db_path):
         self.db_path = db_path
 
+    COLUMNS = ("SELECT miner, ts_ok, device_family, device_arch, entropy_score, "
+               "fingerprint_passed, signing_pubkey FROM miner_attest_recent ")
+
     def lookup(self, ident):
-        """Find the latest attestation by miner-id OR signing_pubkey. Read-only."""
+        """Resolve one identity to at most one attestation row. Read-only.
+
+        The two identity namespaces are NOT equivalent and are not unioned:
+
+        * `miner` is the node's PRIMARY KEY — assigned, unique, rate-limited.
+        * `signing_pubkey` is whatever the caller put in the attestation body's
+          `public_key` field. The node verifies it only when a `signature` is
+          also supplied (the unsigned path is explicitly supported), so it is
+          attacker-chosen data.
+
+        Resolving them in one `miner = ? OR signing_pubkey = ?` and breaking
+        ties by `ts_ok DESC` let anyone point their own attestation's
+        `public_key` at another miner's identity and take over its verdict.
+        So: the primary key wins outright, and the self-reported column is
+        consulted only for well-formed Ed25519 keys, fail-closed on collision.
+
+        Returns the row dict plus `_matched_field`, or None, or the marker
+        {"_ambiguous": True} when one pubkey maps to several miners.
+        """
         uri = f"file:{self.db_path}?mode=ro"
         conn = sqlite3.connect(uri, uri=True, timeout=5)
         try:
             conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT miner, ts_ok, device_family, device_arch, entropy_score, "
-                "fingerprint_passed, signing_pubkey FROM miner_attest_recent "
-                "WHERE miner = ? OR signing_pubkey = ? "
-                "ORDER BY ts_ok DESC LIMIT 1",
-                (ident, ident),
-            ).fetchone()
-            return dict(row) if row else None
+            row = conn.execute(self.COLUMNS + "WHERE miner = ?", (ident,)).fetchone()
+            if row:
+                out = dict(row)
+                out["_matched_field"] = "miner"
+                return out
+            if not _ED25519_PUBKEY_HEX.match(ident or ""):
+                # Not a miner-id and not shaped like a key: nothing to match.
+                # Never fall through to a substring/looser match here.
+                return None
+            rows = conn.execute(
+                self.COLUMNS + "WHERE signing_pubkey = ? ORDER BY ts_ok DESC LIMIT 2",
+                (ident,),
+            ).fetchall()
+            if not rows:
+                return None
+            if len(rows) > 1:
+                # Several miners claim this key. Since the claim is unverified,
+                # there is no honest way to pick one — say so instead of
+                # silently serving the most recent.
+                return {"_ambiguous": True}
+            out = dict(rows[0])
+            out["_matched_field"] = "signing_pubkey"
+            return out
         finally:
             conn.close()
 
@@ -112,12 +159,14 @@ class Signer:
 def build_verdict(ident, row, signer):
     """Build the scoped, signed attestation verdict for one identity."""
     now = int(time.time())
-    if not row:
+    if not row or row.get("_ambiguous"):
         attestation = {
             "query": ident, "found": False,
             "is_physical": None, "anti_emulation_pass": None,
-            "device_family": None, "antiquity_class": None,
+            "device_family": None, "device_arch": None, "antiquity_class": None,
             "attestation_age_s": None, "fresh": False,
+            "matched_field": None, "matched_miner": None,
+            "ambiguous_identity": bool(row and row.get("_ambiguous")),
         }
     else:
         fp_pass = bool(row.get("fingerprint_passed"))
@@ -132,6 +181,12 @@ def build_verdict(ident, row, signer):
             "antiquity_class": _antiquity_class(row.get("device_arch")),
             "attestation_age_s": age,
             "fresh": age < ATTESTATION_TTL,
+            # Which namespace answered, and whose row it was. `signing_pubkey`
+            # is self-reported by the attesting miner; `miner` is the node's
+            # primary key. A consumer pinning an identity can now tell.
+            "matched_field": row.get("_matched_field"),
+            "matched_miner": row.get("miner"),
+            "ambiguous_identity": False,
         }
     # The signed envelope. NOTE: no field named bare `verified`.
     envelope = {
