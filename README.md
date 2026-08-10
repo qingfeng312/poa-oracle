@@ -61,4 +61,10 @@ for work-legitimacy.
 python3 test_oracle.py   # 18 contract checks: scope present, no bare 'verified', sigs verify
 ```
 
+## Contributing
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, the
+offline test workflow, and the **non-negotiable scope-contract rules** any
+change must preserve (no bare `verified` field, no unioned identity
+namespaces, no multi-node co-signing claims, read-only against the node).
+
 Part of the [RustChain](https://rustchain.org) ecosystem · MIT © Elyan Labs.

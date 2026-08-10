@@ -64,6 +64,13 @@ _ANTIQUITY = {
 
 
 def _antiquity_class(device_arch):
+    """Map a raw ``device_arch`` string to a coarse antiquity-class label.
+
+    Coarsens the many fine-grained architecture strings the node records
+    (g3, g4, g5, power8, sparc, mips, x86_64, aarch64, ...) into a small
+    set of bucket labels used in the verdict. These are labels only, not a
+    uniqueness or scarcity claim. Unknown architectures return ``"unknown"``.
+    """
     a = (device_arch or "").lower()
     for k, v in _ANTIQUITY.items():
         if k in a:
@@ -75,6 +82,7 @@ class OracleDB:
     """Read-only accessor over the node's rustchain_v2.db."""
 
     def __init__(self, db_path):
+        """Store the path to the node DB; opened read-only on every lookup."""
         self.db_path = db_path
 
     COLUMNS = ("SELECT miner, ts_ok, device_family, device_arch, entropy_score, "
@@ -135,6 +143,12 @@ class Signer:
     """Ed25519 oracle signer. Key persisted at key_path (0600), created if absent."""
 
     def __init__(self, key_path):
+        """Load the oracle's Ed25519 key from ``key_path``, or generate one.
+
+        On first run the key is generated and persisted as ``{"private_key":
+        <hex>}`` with mode 0600. On subsequent runs the hex private key is read
+        back and the corresponding public key is exposed as ``pubkey_hex``.
+        """
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
         from cryptography.hazmat.primitives.serialization import (
             Encoding, NoEncryption, PrivateFormat, PublicFormat)
@@ -153,6 +167,7 @@ class Signer:
             Encoding.Raw, PublicFormat.Raw).hex()
 
     def sign(self, message_bytes):
+        """Return a hex Ed25519 signature over ``message_bytes``."""
         return self.priv.sign(message_bytes).hex()
 
 
@@ -207,6 +222,7 @@ class Handler(BaseHTTPRequestHandler):
     signer = None
 
     def _send(self, code, obj):
+        """Serialize ``obj`` as JSON and write it as the HTTP response with ``code``."""
         body = json.dumps(obj, indent=2).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
@@ -215,6 +231,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        """Route GET requests: ``/health`` or ``/oracle/attest/<id>``.
+
+        ``/health`` returns the oracle status and public key. Any other path
+        under ``/oracle/attest/`` looks up the identity (miner-id, RTC address,
+        or signing pubkey) and returns the signed, scoped verdict. A data
+        source error becomes 503 rather than a fake ``found: false`` verdict;
+        unknown paths get a 404 listing the valid endpoints.
+        """
         path = urlparse(self.path).path
         if path == "/health":
             return self._send(200, {"status": "ok", "oracle": "poa-attest",
@@ -232,10 +256,18 @@ class Handler(BaseHTTPRequestHandler):
                                 "endpoints": ["/oracle/attest/<id>", "/health"]})
 
     def log_message(self, *a):  # quiet
+        """Silence the default stderr access log (the oracle logs its own startup line)."""
         pass
 
 
 def main():
+    """Parse CLI args, wire the DB + signer into the handler, and serve.
+
+    Opens the node DB read-only, loads (or creates) the oracle's Ed25519 key,
+    binds both onto the ``Handler`` class, and starts a ``ThreadingHTTPServer``
+    on the configured host/port. Prints the listening address, key prefix,
+    and DB path (read-only) before entering the serve loop.
+    """
     p = argparse.ArgumentParser(description="PoA-Attest read-only oracle sidecar")
     p.add_argument("--db", default="/root/rustchain/rustchain_v2.db",
                    help="path to rustchain_v2.db (opened read-only)")
