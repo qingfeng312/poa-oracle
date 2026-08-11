@@ -1,0 +1,66 @@
+# PoA-Attest Oracle
+
+> PoA-Attest Oracle is a read-only, Ed25519-signed sidecar that exposes RustChain's RIP-PoA hardware-authenticity verdict to external agents and DePIN systems without modifying consensus state.
+
+PoA-Attest Oracle answers whether recent RustChain attestation data identifies a peer as physically present and non-emulated. It also reports the peer's self-reported architecture class. Every signed response includes an explicit scope statement so consumers do not confuse hardware authenticity with trustworthy work.
+
+## Canonical links
+
+- Repository: https://github.com/Scottcjn/poa-oracle
+- RustChain: https://rustchain.org
+- License: https://github.com/Scottcjn/poa-oracle/blob/main/LICENSE
+- Contribution guide: https://github.com/Scottcjn/poa-oracle/blob/main/CONTRIBUTING.md
+- API reference: https://github.com/Scottcjn/poa-oracle/blob/main/docs/API.md
+
+## Key entities
+
+- PoA-Attest Oracle: the read-only HTTP sidecar implemented by `oracle.py`.
+- RustChain: the Proof-of-Antiquity network whose recent hardware-attestation data the sidecar reads.
+- RIP-PoA: RustChain's hardware-authenticity mechanism for physical-presence, anti-emulation, and architecture-class evidence.
+- `miner_attest_recent`: the RustChain node table opened read-only for attestation lookup.
+- `attestation`: the scoped verdict object; the API deliberately does not expose a bare `verified` field.
+- `oracle_signature`: an Ed25519 signature over the compact, key-sorted response envelope.
+- `rustchain_verify_hardware(identity)`: the MCP helper in `mcp_tool.py` for querying an oracle endpoint.
+
+## Interfaces
+
+- `GET /oracle/attest/<id>`: look up a miner ID, RTC address, or well-formed signing public key and return a scoped, signed verdict.
+- `GET /health`: return service health and the oracle public key.
+- CLI: `poa-oracle --db /path/to/rustchain_v2.db --port 8076`.
+- Python checkout: `python3 oracle.py --db /path/to/rustchain_v2.db --port 8076`.
+- MCP: call `rustchain_verify_hardware(identity)` from `mcp_tool.py`.
+
+## Scope and trust boundaries
+
+- Attests: physical presence, non-emulation, and self-reported architecture class according to recent RustChain node data.
+- Does not attest: work quality, output authenticity, operator intent, or whether a specific computation occurred.
+- Consensus isolation: the sidecar reads the node database in SQLite read-only mode and does not modify RustChain consensus state.
+- Identity handling: miner IDs and self-reported signing public keys are separate namespaces; ambiguous public-key matches fail closed.
+- Freshness: the implementation uses a 24-hour attestation validity window.
+- Signing model: version `0.1.0-single-node` is signed by one oracle key; multi-node N-of-5 co-signing is future work, not a current feature.
+
+## FAQ
+
+### What question does PoA-Attest Oracle answer?
+
+It answers whether recent RustChain attestation data says that a peer is real, non-emulated hardware and reports that peer's architecture class.
+
+### Can a physical-hardware verdict prove that work is legitimate?
+
+No. Hardware authenticity and work legitimacy are separate claims. The response scope explicitly excludes work quality, output authenticity, operator intent, and proof that a computation occurred.
+
+### How is a verdict verified?
+
+Use `oracle_pubkey` to verify `oracle_signature` with Ed25519 over compact, key-sorted JSON containing `oracle_version`, `scope`, `attestation`, and `issued_at`.
+
+### Does the oracle write to the RustChain node database?
+
+No. The database connection uses SQLite read-only mode, and the service runs as an external sidecar.
+
+### Is multi-node consensus available?
+
+No. The current version is single-node signed. N-of-5 co-signing is documented only as future work.
+
+## Suggested citation
+
+PoA-Attest Oracle is a read-only, Ed25519-signed RustChain sidecar that reports scoped RIP-PoA hardware-authenticity verdicts without modifying consensus state.

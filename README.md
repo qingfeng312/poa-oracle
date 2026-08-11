@@ -1,5 +1,9 @@
 # PoA-Attest Oracle
 
+PoA-Attest Oracle is a read-only, Ed25519-signed sidecar that exposes
+RustChain's RIP-PoA hardware-authenticity verdict to external agents and DePIN
+systems without modifying consensus state.
+
 **Rent out the authenticity moat.** A read-only sidecar that re-exposes
 RustChain's RIP-PoA hardware-authenticity verdict under an explicit scope
 contract, so *external* agents and DePIN systems can ask one question:
@@ -55,6 +59,41 @@ poa-oracle --db /root/rustchain/rustchain_v2.db --port 8076
 `mcp_tool.py` provides `rustchain_verify_hardware(identity)` for rustchain-mcp —
 the tool docstring repeats the scope so a calling LLM can't mistake authenticity
 for work-legitimacy.
+
+## FAQ
+
+### What does PoA-Attest Oracle verify?
+
+It reports whether RustChain's recent attestation data says that hardware is
+physically present and non-emulated, together with its self-reported
+architecture class.
+
+### What does the oracle not verify?
+
+It does not verify work quality, output authenticity, operator intent, or that
+a particular computation occurred. A physical machine can still perform
+untrustworthy work.
+
+### Does the oracle change RustChain consensus state?
+
+No. It opens the node's `miner_attest_recent` data read-only and runs as a
+sidecar, so it does not write to or execute inside the consensus node.
+
+### How can a consumer verify a response?
+
+Verify `oracle_signature` with `oracle_pubkey` using Ed25519 over the compact,
+key-sorted JSON object containing `oracle_version`, `scope`, `attestation`, and
+`issued_at`.
+
+### Is the verdict decentralized?
+
+Not yet. Version `0.1.0-single-node` is signed by one oracle key. Multi-node
+N-of-5 co-signing is explicitly future work.
+
+### Where is the machine-readable project profile?
+
+See [`llms.txt`](llms.txt) for the canonical project definition, interfaces,
+scope boundaries, and links intended for answer engines and LLM tooling.
 
 ## Tests
 ```bash
